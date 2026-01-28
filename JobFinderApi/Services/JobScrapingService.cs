@@ -1,7 +1,5 @@
+using HtmlAgilityPack;
 using JobFinderApi.Models;
-using Anthropic.SDK;
-using Anthropic.SDK.Messaging;
-using System.Text.Json;
 
 namespace JobFinderApi.Services;
 
@@ -14,13 +12,11 @@ public class JobScrapingService : IJobScrapingService
 {
     private readonly HttpClient _httpClient;
     private readonly ILogger<JobScrapingService> _logger;
-    private readonly IConfiguration _configuration;
 
-    public JobScrapingService(HttpClient httpClient, ILogger<JobScrapingService> logger, IConfiguration configuration)
+    public JobScrapingService(HttpClient httpClient, ILogger<JobScrapingService> logger)
     {
         _httpClient = httpClient;
         _logger = logger;
-        _configuration = configuration;
     }
 
     public async Task<List<JobListing>> SearchJobsAsync(string source, CancellationToken cancellationToken = default)
@@ -29,8 +25,19 @@ public class JobScrapingService : IJobScrapingService
 
         try
         {
-            // Use Claude API to search for jobs
-            jobs.AddRange(await SearchWithClaudeAsync(source, cancellationToken));
+            if (source.Equals("indeed", StringComparison.OrdinalIgnoreCase))
+            {
+                jobs.AddRange(await SearchIndeedAsync(cancellationToken));
+            }
+            else if (source.Equals("monster", StringComparison.OrdinalIgnoreCase))
+            {
+                jobs.AddRange(await SearchMonsterAsync(cancellationToken));
+            }
+            else if (source.Equals("all", StringComparison.OrdinalIgnoreCase))
+            {
+                jobs.AddRange(await SearchIndeedAsync(cancellationToken));
+                jobs.AddRange(await SearchMonsterAsync(cancellationToken));
+            }
         }
         catch (Exception ex)
         {
@@ -40,164 +47,305 @@ public class JobScrapingService : IJobScrapingService
         return jobs;
     }
 
-    private async Task<List<JobListing>> SearchWithClaudeAsync(string source, CancellationToken cancellationToken)
+    private async Task<List<JobListing>> SearchIndeedAsync(CancellationToken cancellationToken)
     {
         var jobs = new List<JobListing>();
 
         try
         {
-            var apiKey = _configuration["ANTHROPIC_API_KEY"] ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
+            var searchTerms = "full-stack developer C# Azure security clearance";
+            var url = $"https://www.indeed.com/jobs?q={Uri.EscapeDataString(searchTerms)}&l=";
 
-            if (string.IsNullOrEmpty(apiKey))
+            _logger.LogInformation("Searching Indeed with URL: {Url}", url);
+
+            // Create request with browser-like headers
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+
+            // Simulate a real browser by adding common headers
+            request.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+            request.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
+            request.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+            request.Headers.TryAddWithoutValidation("Accept-Encoding", "gzip, deflate, br");
+            request.Headers.TryAddWithoutValidation("Referer", "https://www.indeed.com/");
+            request.Headers.TryAddWithoutValidation("Sec-Fetch-Dest", "document");
+            request.Headers.TryAddWithoutValidation("Sec-Fetch-Mode", "navigate");
+            request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+            request.Headers.TryAddWithoutValidation("Sec-Fetch-User", "?1");
+            request.Headers.TryAddWithoutValidation("Upgrade-Insecure-Requests", "1");
+            request.Headers.TryAddWithoutValidation("sec-ch-ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"");
+            request.Headers.TryAddWithoutValidation("sec-ch-ua-mobile", "?0");
+            request.Headers.TryAddWithoutValidation("sec-ch-ua-platform", "\"Windows\"");
+
+            var response = await _httpClient.SendAsync(request, cancellationToken);
+
+            _logger.LogInformation("Indeed response status: {StatusCode}", response.StatusCode);
+
+            if (!response.IsSuccessStatusCode)
             {
-                _logger.LogWarning("ANTHROPIC_API_KEY not found, returning sample jobs");
-                return GetSampleJobs();
+                _logger.LogWarning("Indeed returned status {StatusCode}", response.StatusCode);
+                return jobs;
             }
 
-            var client = new AnthropicClient(apiKey);
+            var content = await response.Content.ReadAsStringAsync(cancellationToken);
+            _logger.LogInformation("Indeed returned {Length} characters", content.Length);
 
-            var sourceText = source.Equals("all", StringComparison.OrdinalIgnoreCase)
-                ? "Indeed and Monster"
-                : source;
+            // Save HTML to file for debugging
+            var debugPath = Path.Combine(Path.GetTempPath(), "indeed_response.html");
+            await File.WriteAllTextAsync(debugPath, content, cancellationToken);
+            _logger.LogInformation("Indeed: Saved HTML to {Path}", debugPath);
 
-            var prompt = $@"Search the web for full-stack developer job listings on {sourceText} that meet ALL these criteria:
-1. Require C# or .NET experience
-2. Require Azure cloud experience
-3. Require an active U.S. security clearance (Secret, Top Secret, TS/SCI, etc.)
+            var doc = new HtmlDocument();
+            doc.LoadHtml(content);
 
-For each job you find, return a JSON array with this exact structure:
-[
-  {{
-    ""title"": ""job title"",
-    ""company"": ""company name"",
-    ""location"": ""city, state or Remote"",
-    ""description"": ""brief job description focusing on requirements"",
-    ""url"": ""full job posting URL"",
-    ""source"": ""Indeed"" or ""Monster""
-  }}
-]
+            // Try multiple selectors since Indeed's HTML structure changes
+            var jobCards = doc.DocumentNode.SelectNodes("//div[contains(@class, 'job_seen_beacon')]") ??
+                          doc.DocumentNode.SelectNodes("//div[@class='resultContent']") ??
+                          doc.DocumentNode.SelectNodes("//div[contains(@class, 'jobsearch-ResultsList')]//div[contains(@class, 'result')]") ??
+                          doc.DocumentNode.SelectNodes("//div[contains(@class, 'job')]") ??
+                          doc.DocumentNode.SelectNodes("//li[contains(@class, 'result')]") ??
+                          doc.DocumentNode.SelectNodes("//article") ??
+                          doc.DocumentNode.SelectNodes("//*[@data-testid='job-card']");
 
-Find 5-10 real job postings that match ALL criteria. Return ONLY the JSON array, no other text.";
+            _logger.LogInformation("Indeed: Found {Count} job cards", jobCards?.Count ?? 0);
 
-            _logger.LogInformation("Sending request to Claude API for source: {Source}", source);
-
-            var messages = new List<Message>
+            if (jobCards != null)
             {
-                new Message(RoleType.User, prompt)
-            };
-
-            var parameters = new MessageParameters
-            {
-                Messages = messages,
-                MaxTokens = 4096,
-                Model = "claude-3-5-sonnet-20241022",
-                Stream = false,
-                Temperature = 1.0m
-            };
-
-            var response = await client.Messages.GetClaudeMessageAsync(parameters, cancellationToken);
-
-            if (response?.Content?.Count > 0 && response.Content[0] is Anthropic.SDK.Messaging.TextContent textContent)
-            {
-                var jsonText = textContent.Text;
-                _logger.LogInformation("Claude API response received: {Length} characters", jsonText.Length);
-
-                // Extract JSON array from response (Claude might include markdown formatting)
-                var jsonStart = jsonText.IndexOf('[');
-                var jsonEnd = jsonText.LastIndexOf(']');
-
-                if (jsonStart >= 0 && jsonEnd > jsonStart)
+                foreach (var card in jobCards.Take(20))
                 {
-                    jsonText = jsonText.Substring(jsonStart, jsonEnd - jsonStart + 1);
-                }
-
-                var jobData = JsonSerializer.Deserialize<List<ClaudeJobResult>>(jsonText, new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true
-                });
-
-                if (jobData != null)
-                {
-                    foreach (var job in jobData)
+                    try
                     {
-                        jobs.Add(new JobListing
-                        {
-                            Title = job.Title ?? "Unknown Title",
-                            Company = job.Company ?? "Unknown Company",
-                            Location = job.Location ?? "Remote",
-                            Description = job.Description ?? "",
-                            Url = job.Url ?? "https://www.indeed.com",
-                            Source = job.Source ?? source,
-                            PostedDate = DateTime.UtcNow,
-                            RequiresSecurityClearance = true
-                        });
-                    }
+                        // Try multiple selectors for title
+                        var titleNode = card.SelectSingleNode(".//h2[contains(@class, 'jobTitle')]//span[@title]") ??
+                                       card.SelectSingleNode(".//h2//a") ??
+                                       card.SelectSingleNode(".//a[contains(@class, 'jcs-JobTitle')]");
 
-                    _logger.LogInformation("Claude API: Parsed {Count} jobs", jobs.Count);
+                        var companyNode = card.SelectSingleNode(".//span[@data-testid='company-name']") ??
+                                         card.SelectSingleNode(".//span[contains(@class, 'companyName')]");
+
+                        var locationNode = card.SelectSingleNode(".//div[@data-testid='text-location']") ??
+                                          card.SelectSingleNode(".//div[contains(@class, 'companyLocation')]");
+
+                        var descriptionNode = card.SelectSingleNode(".//div[contains(@class, 'job-snippet')]") ??
+                                             card.SelectSingleNode(".//div[@class='summary']");
+
+                        var linkNode = card.SelectSingleNode(".//h2//a") ??
+                                      card.SelectSingleNode(".//a[contains(@class, 'jcs-JobTitle')]");
+
+                        if (titleNode != null && companyNode != null)
+                        {
+                            var title = titleNode.GetAttributeValue("title", titleNode.InnerText).Trim();
+                            var company = companyNode.InnerText.Trim();
+                            var location = locationNode?.InnerText.Trim() ?? "Remote";
+                            var description = descriptionNode?.InnerText.Trim() ?? "";
+                            var jobUrl = linkNode?.GetAttributeValue("href", "");
+
+                            var fullText = $"{title} {description}";
+                            var requiresClearance = ContainsSecurityClearanceKeyword(fullText);
+                            var hasCSharp = fullText.Contains("C#", StringComparison.OrdinalIgnoreCase) ||
+                                          fullText.Contains(".NET", StringComparison.OrdinalIgnoreCase);
+                            var hasAzure = fullText.Contains("Azure", StringComparison.OrdinalIgnoreCase);
+                            var isFullStack = fullText.Contains("full", StringComparison.OrdinalIgnoreCase) &&
+                                            fullText.Contains("stack", StringComparison.OrdinalIgnoreCase);
+
+                            _logger.LogInformation("Indeed job: {Title} - FullStack:{FS} C#:{CS} Azure:{Az} Clearance:{Cl}",
+                                title, isFullStack, hasCSharp, hasAzure, requiresClearance);
+
+                            if (isFullStack && (hasCSharp || hasAzure) && requiresClearance)
+                            {
+                                jobs.Add(new JobListing
+                                {
+                                    Title = title,
+                                    Company = company,
+                                    Location = location,
+                                    Description = description,
+                                    Url = jobUrl.StartsWith("http") ? jobUrl : $"https://www.indeed.com{jobUrl}",
+                                    Source = "Indeed",
+                                    PostedDate = DateTime.UtcNow,
+                                    RequiresSecurityClearance = true
+                                });
+                                _logger.LogInformation("Added Indeed job: {Title}", title);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Error parsing Indeed job card");
+                    }
                 }
-            }
-            else
-            {
-                _logger.LogWarning("No content received from Claude API");
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error using Claude API to search jobs");
-            // Return sample jobs as fallback
-            return GetSampleJobs();
+            _logger.LogError(ex, "Error searching Indeed");
         }
 
+        _logger.LogInformation("Indeed: Returning {Count} jobs", jobs.Count);
         return jobs;
     }
 
-    private List<JobListing> GetSampleJobs()
+    private async Task<List<JobListing>> SearchMonsterAsync(CancellationToken cancellationToken)
     {
-        return new List<JobListing>
+        var jobs = new List<JobListing>();
+
+        try
         {
-            new JobListing
+            // Add delay to simulate human browsing (1-3 seconds)
+            await Task.Delay(TimeSpan.FromMilliseconds(new Random().Next(1000, 3000)), cancellationToken);
+
+            var searchTerms = "full-stack developer C# Azure security clearance";
+            var url = $"https://www.monster.com/jobs/search/?q={Uri.EscapeDataString(searchTerms)}";
+
+            _logger.LogInformation("Searching Monster with URL: {Url}", url);
+
+            // Create request with browser-like headers
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+
+            // Simulate a real browser by adding common headers
+            request.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+            request.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
+            request.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+            request.Headers.TryAddWithoutValidation("Accept-Encoding", "gzip, deflate, br");
+            request.Headers.TryAddWithoutValidation("Referer", "https://www.monster.com/");
+            request.Headers.TryAddWithoutValidation("Sec-Fetch-Dest", "document");
+            request.Headers.TryAddWithoutValidation("Sec-Fetch-Mode", "navigate");
+            request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+            request.Headers.TryAddWithoutValidation("Sec-Fetch-User", "?1");
+            request.Headers.TryAddWithoutValidation("Upgrade-Insecure-Requests", "1");
+            request.Headers.TryAddWithoutValidation("sec-ch-ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"");
+            request.Headers.TryAddWithoutValidation("sec-ch-ua-mobile", "?0");
+            request.Headers.TryAddWithoutValidation("sec-ch-ua-platform", "\"Windows\"");
+
+            var response = await _httpClient.SendAsync(request, cancellationToken);
+
+            _logger.LogInformation("Monster response status: {StatusCode}", response.StatusCode);
+
+            if (!response.IsSuccessStatusCode)
             {
-                Title = "Senior Full-Stack Developer - TS/SCI Required",
-                Company = "Northrop Grumman",
-                Location = "McLean, VA",
-                Description = "Seeking experienced full-stack developer with C#, .NET Core, Azure, and active TS/SCI clearance. Build mission-critical applications.",
-                Url = "https://www.indeed.com/jobs",
-                Source = "Indeed",
-                PostedDate = DateTime.UtcNow.AddDays(-2),
-                RequiresSecurityClearance = true
-            },
-            new JobListing
-            {
-                Title = "Full-Stack Software Engineer - Secret Clearance",
-                Company = "Booz Allen Hamilton",
-                Location = "Washington, DC",
-                Description = "Full-stack developer role requiring C#, Azure DevOps, and active Secret clearance. Support government clients.",
-                Url = "https://www.indeed.com/jobs",
-                Source = "Indeed",
-                PostedDate = DateTime.UtcNow.AddDays(-1),
-                RequiresSecurityClearance = true
-            },
-            new JobListing
-            {
-                Title = "Azure Full-Stack Developer - Clearance Required",
-                Company = "Leidos",
-                Location = "Reston, VA",
-                Description = "Develop cloud solutions using C#, .NET, Azure. Must have or be able to obtain Secret clearance.",
-                Url = "https://www.monster.com/jobs",
-                Source = "Monster",
-                PostedDate = DateTime.UtcNow.AddDays(-3),
-                RequiresSecurityClearance = true
+                _logger.LogWarning("Monster returned status {StatusCode}", response.StatusCode);
+                return jobs;
             }
-        };
+
+            var content = await response.Content.ReadAsStringAsync(cancellationToken);
+            _logger.LogInformation("Monster returned {Length} characters", content.Length);
+
+            // Save HTML to file for debugging
+            var debugPathMonster = Path.Combine(Path.GetTempPath(), "monster_response.html");
+            await File.WriteAllTextAsync(debugPathMonster, content, cancellationToken);
+            _logger.LogInformation("Monster: Saved HTML to {Path}", debugPathMonster);
+
+            var doc = new HtmlDocument();
+            doc.LoadHtml(content);
+
+            // Try multiple selectors
+            var jobCards = doc.DocumentNode.SelectNodes("//section[contains(@class, 'card-content')]") ??
+                          doc.DocumentNode.SelectNodes("//div[contains(@class, 'job-card')]") ??
+                          doc.DocumentNode.SelectNodes("//article") ??
+                          doc.DocumentNode.SelectNodes("//*[@data-testid='job-card']") ??
+                          doc.DocumentNode.SelectNodes("//div[contains(@class, 'card')]");
+
+            _logger.LogInformation("Monster: Found {Count} job cards", jobCards?.Count ?? 0);
+
+            if (jobCards != null)
+            {
+                foreach (var card in jobCards.Take(20))
+                {
+                    try
+                    {
+                        var titleNode = card.SelectSingleNode(".//h2//a") ??
+                                       card.SelectSingleNode(".//a[contains(@class, 'title')]");
+
+                        var companyNode = card.SelectSingleNode(".//div[contains(@class, 'company')]//a") ??
+                                         card.SelectSingleNode(".//span[contains(@class, 'company')]");
+
+                        var locationNode = card.SelectSingleNode(".//div[contains(@class, 'location')]");
+
+                        var descriptionNode = card.SelectSingleNode(".//div[contains(@class, 'summary')]") ??
+                                             card.SelectSingleNode(".//div[contains(@class, 'description')]");
+
+                        var linkNode = card.SelectSingleNode(".//h2//a");
+
+                        if (titleNode != null && companyNode != null)
+                        {
+                            var title = titleNode.InnerText.Trim();
+                            var company = companyNode.InnerText.Trim();
+                            var location = locationNode?.InnerText.Trim() ?? "Remote";
+                            var description = descriptionNode?.InnerText.Trim() ?? "";
+                            var jobUrl = linkNode?.GetAttributeValue("href", "");
+
+                            var fullText = $"{title} {description}";
+                            var requiresClearance = ContainsSecurityClearanceKeyword(fullText);
+                            var hasCSharp = fullText.Contains("C#", StringComparison.OrdinalIgnoreCase) ||
+                                          fullText.Contains(".NET", StringComparison.OrdinalIgnoreCase);
+                            var hasAzure = fullText.Contains("Azure", StringComparison.OrdinalIgnoreCase);
+                            var isFullStack = fullText.Contains("full", StringComparison.OrdinalIgnoreCase) &&
+                                            fullText.Contains("stack", StringComparison.OrdinalIgnoreCase);
+
+                            _logger.LogInformation("Monster job: {Title} - FullStack:{FS} C#:{CS} Azure:{Az} Clearance:{Cl}",
+                                title, isFullStack, hasCSharp, hasAzure, requiresClearance);
+
+                            if (isFullStack && (hasCSharp || hasAzure) && requiresClearance)
+                            {
+                                jobs.Add(new JobListing
+                                {
+                                    Title = title,
+                                    Company = company,
+                                    Location = location,
+                                    Description = description,
+                                    Url = jobUrl.StartsWith("http") ? jobUrl : $"https://www.monster.com{jobUrl}",
+                                    Source = "Monster",
+                                    PostedDate = DateTime.UtcNow,
+                                    RequiresSecurityClearance = true
+                                });
+                                _logger.LogInformation("Added Monster job: {Title}", title);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Error parsing Monster job card");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error searching Monster");
+        }
+
+        _logger.LogInformation("Monster: Returning {Count} jobs", jobs.Count);
+        return jobs;
     }
 
-    private class ClaudeJobResult
+    private bool ContainsSecurityClearanceKeyword(string text)
     {
-        public string? Title { get; set; }
-        public string? Company { get; set; }
-        public string? Location { get; set; }
-        public string? Description { get; set; }
-        public string? Url { get; set; }
-        public string? Source { get; set; }
+        if (string.IsNullOrEmpty(text))
+            return false;
+
+        var clearanceKeywords = new[]
+        {
+            "security clearance",
+            "secret clearance",
+            "top secret",
+            "ts/sci",
+            "tssci",
+            "TS/SCI",
+            "clearance required",
+            "must have clearance",
+            "active clearance",
+            "government security clearance",
+            "dod clearance",
+            "public trust",
+            "clearable"
+        };
+
+        foreach (var keyword in clearanceKeywords)
+        {
+            if (text.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
