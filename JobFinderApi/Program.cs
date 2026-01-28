@@ -19,6 +19,9 @@ builder.Services.AddHttpClient<IJobScrapingService, JobScrapingService>()
         };
     });
 
+// Add job storage service as singleton to persist data across requests
+builder.Services.AddSingleton<IJobStorageService, JobStorageService>();
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAll", policy =>
@@ -46,6 +49,10 @@ api.MapGet("/search/{source}", SearchJobs)
 api.MapGet("/", GetAllCachedJobs)
     .WithName("GetAllJobs")
     .WithDescription("Get all cached jobs");
+
+api.MapPost("/", AddJobs)
+    .WithName("AddJobs")
+    .WithDescription("Add jobs from Chrome extension");
 
 // Mock data endpoint for testing
 api.MapGet("/mock", GetMockJobs)
@@ -90,12 +97,32 @@ async Task<IResult> SearchJobs(
 }
 
 async Task<IResult> GetAllCachedJobs(
-    IJobScrapingService jobScrapingService,
+    IJobStorageService jobStorageService,
     ILogger<Program> logger)
 {
-    logger.LogInformation("Fetching all cached jobs");
-    var jobs = await jobScrapingService.SearchJobsAsync("all");
+    logger.LogInformation("Fetching all stored jobs");
+    var jobs = await jobStorageService.GetAllJobsAsync();
     return Results.Ok(new { jobs, count = jobs.Count, timestamp = DateTime.UtcNow });
+}
+
+async Task<IResult> AddJobs(
+    List<JobFinderApi.Models.JobListing> jobs,
+    IJobStorageService jobStorageService,
+    ILogger<Program> logger)
+{
+    logger.LogInformation("Received {Count} jobs from Chrome extension", jobs.Count);
+
+    await jobStorageService.AddJobsAsync(jobs);
+
+    var totalJobs = await jobStorageService.GetJobCountAsync();
+
+    return Results.Ok(new
+    {
+        success = true,
+        added = jobs.Count,
+        total = totalJobs,
+        timestamp = DateTime.UtcNow
+    });
 }
 
 IResult GetMockJobs(ILogger<Program> logger)

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Full-stack job search application that scrapes Indeed and Monster for full-stack developer positions requiring C#, Azure, and security clearance. Built with ASP.NET Core minimal API (backend) and Vue 3 (frontend).
+Full-stack job search application that collects Indeed and Monster job listings for full-stack developer positions requiring C#, Azure, and security clearance. Built with ASP.NET Core minimal API (backend), Vue 3 (frontend), and Chrome extension for data collection.
 
 ## Development Commands
 
@@ -23,7 +23,19 @@ Full-stack job search application that scrapes Indeed and Monster for full-stack
 ### Full Build
 - `./build.sh` - Build frontend and prepare for production (runs npm install and build)
 
+### Chrome Extension (JobFinderExtension/)
+- Load unpacked extension in Chrome (`chrome://extensions/`)
+- Extension automatically collects jobs while browsing Indeed/Monster
+- See [JobFinderExtension/README.md](JobFinderExtension/README.md) for full installation guide
+
 ## Architecture
+
+**Current Data Collection Method**: Chrome Extension (recommended)
+- Extension runs while browsing Indeed/Monster
+- Extracts job data from fully-rendered pages (solves JavaScript rendering issue)
+- Posts jobs to API endpoint `POST /api/jobs`
+- Jobs stored in-memory via JobStorageService
+- Frontend displays collected jobs via `GET /api/jobs`
 
 ### Request Flow
 1. User interacts with Vue SPA served from JobFinderApi/wwwroot
